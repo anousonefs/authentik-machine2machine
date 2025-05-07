@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -18,24 +19,17 @@ func main() {
 	jwksURL := os.Getenv("JWKS_URL")
 	e := echo.New()
 
-	// jwksURL := "https://accounts.laoit.dev/application/o/xangkham/jwks/"
-
-	// Load KeyFunc from remote JWKS endpoint
-	// Create the keyfunc.Keyfunc.
-	k, err := keyfunc.NewDefaultCtx(context.Background(), []string{jwksURL}) // Context is used to end the refresh goroutine.
+	ctx := context.Background()
+	k, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURL})
 	if err != nil {
 		log.Fatalf("Failed to create a keyfunc.Keyfunc from the server's URL.\nError: %s", err)
 	}
+	defer func() {
+		println("=> close ctx")
+		ctx.Done()
+	}()
 
-	if err != nil {
-		slog.Error("Failed to get JWKS", "error", err)
-		os.Exit(1)
-	}
-
-	// JWT middleware with KeyFunc (not static SigningKey!)
-	e.Use(echojwt.WithConfig(echojwt.Config{
-		KeyFunc: k.Keyfunc,
-	}))
+	e.Use(Auth(k))
 
 	// Protected → requires Bearer token
 	e.GET("/events", func(c echo.Context) error {
@@ -53,10 +47,21 @@ func main() {
 		claims, _ := user.Claims.(jwt.MapClaims)
 
 		slog.InfoContext(ctx, "Received JWT-protected request", "claims", claims, "body", string(body))
-		slog.Info("header", c.Request().Header)
+		fmt.Printf("=> client id: %v\n", claims["aud"])
+
 		return c.String(http.StatusOK, "Protected resource accessed.")
 	})
 
 	slog.Info("Server started on :8080")
 	e.Logger.Fatal(e.Start(":8080"))
+}
+
+func Auth(k keyfunc.Keyfunc) echo.MiddlewareFunc {
+	return echojwt.WithConfig(echojwt.Config{
+		KeyFunc: k.Keyfunc,
+		ErrorHandler: func(c echo.Context, err error) error {
+			fmt.Printf("=> error: %v\n", err)
+			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid token")
+		},
+	})
 }
